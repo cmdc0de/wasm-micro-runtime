@@ -92,6 +92,19 @@ get_sub_module_inst(const WASMModuleInstance *parent_module_inst,
     }
     return node ? node->module_inst : NULL;
 }
+
+static WASMModuleInstance *
+get_sub_module_inst_by_name(const WASMModuleInstance *parent_module_inst, const char*sub_module) {
+
+    bh_list *sub_module_inst_list = parent_module_inst->sub_module_inst_list;
+    WASMSubModInstNode *node = bh_list_first_elem(sub_module_inst_list);
+
+    //while (node && sub_module != node->module_inst->module) {
+    while (node && strcmp(sub_module,node->module_name)!=0) {
+        node = bh_list_elem_next(node);
+    }
+    return node ? node->module_inst : NULL;
+}
 #endif
 
 /**
@@ -1608,16 +1621,84 @@ wasm_deinstantiate(WASMModuleInstance *module_inst, bool is_sub_inst)
     wasm_runtime_free(module_inst);
 }
 
+static bool parse_function_name(char *orig_function_name, char **p_module_name, char **p_function_name) {
+	if (orig_function_name[0] != '$') {
+		*p_module_name = NULL;
+		*p_function_name = orig_function_name;
+		return true;
+	}
+
+	/**
+	* $module_name$function_name\0
+	*  ===>
+	* module_name\0function_name\0
+	*  ===>
+	* module_name
+	* function_name
+	*/
+	char *p1 = orig_function_name;
+	char *p2 = strchr(p1 + 1, '$');
+	if (!p2) {
+		LOG_DEBUG("can not parse the incoming function name");
+		return false;
+	}
+
+	*p_module_name = p1 + 1;
+	*p2 = '\0';
+	*p_function_name = p2 + 1;
+	return strlen(*p_module_name) && strlen(*p_function_name);
+}
+
+
 WASMFunctionInstance*
 wasm_lookup_function(const WASMModuleInstance *module_inst,
-                     const char *name, const char *signature)
-{
-    uint32 i;
-    for (i = 0; i < module_inst->export_func_count; i++)
-        if (!strcmp(module_inst->export_functions[i].name, name))
-            return module_inst->export_functions[i].function;
-    (void)signature;
-    return NULL;
+                     const char *name, const char *signature) {
+	WASMFunctionInstance *ret = NULL;
+	if(!strchr(name,'$')) { //check if multi module reference
+		uint32 i;
+		for (i = 0; i < module_inst->export_func_count; i++) {
+			if (!strcmp(module_inst->export_functions[i].name, name)) {
+				return module_inst->export_functions[i].function;
+			}
+		}
+	} else {
+		//return wasm_resolve_function(module_inst,name,signature);
+		WASMModuleInstance *sub_module_inst = NULL;
+		#define MAX_MODULE_NAME 128
+		char orginalName[MAX_MODULE_NAME] = {'\0'};
+		char *subModuleName = 0;
+		char *functionName = 0;
+
+		strncpy(&orginalName[0],name, strlen(name));
+
+		if (parse_function_name(&orginalName[0], &subModuleName, &functionName)) {
+		#if WASM_ENABLE_INTERP != 0
+			if (module_inst->module_type == Wasm_Module_Bytecode) {
+				WASMModuleInstance *wasm_inst = (WASMModuleInstance*)module_inst;
+
+			#if WASM_ENABLE_MULTI_MODULE != 0
+				if (subModuleName) {
+					sub_module_inst = get_sub_module_inst_by_name((WASMModuleInstance *)module_inst, subModuleName);
+					if (!sub_module_inst) {
+						LOG_DEBUG("can not find a sub module named %s", subModuleName);
+						return NULL;
+					}
+				}
+				wasm_inst = sub_module_inst ? sub_module_inst : wasm_inst;
+
+			#endif /* WASM_ENABLE_MULTI_MODULE */
+				uint32_t i;
+				for (i = 0; i < wasm_inst->export_func_count; i++) {
+					if (!strcmp(wasm_inst->export_functions[i].name, functionName)) {
+						ret = wasm_inst->export_functions[i].function;
+						break;
+					}
+				}
+			}
+		#endif /* WASM_ENABLE_INTERP */
+		}
+	}
+	return ret;
 }
 
 #if WASM_ENABLE_MULTI_MODULE != 0
